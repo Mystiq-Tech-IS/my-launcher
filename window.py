@@ -827,6 +827,53 @@ class PresetTile(QFrame):
         elif chosen == act_delete:
             self.delete_requested.emit(self.preset)
 
+    def _background_check_launcher_update(self):
+        """Тихая проверка новой версии — показывает тост, если есть."""
+        try:
+            import updater
+        except Exception as e:
+            log.error(f"updater import: {e}")
+            return
+
+        task = _UpdateCheckTask()
+        task.signals.done.connect(self._on_launcher_update_result)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_launcher_update_result(self, info):
+        if info is None:
+            return
+        if self._update_notified_version == info.version:
+            return
+        self._update_notified_version = info.version
+
+        self._show_toast(
+            f"Доступно обновление {info.version}",
+            "Настройки → О программе → Проверить обновления",
+            "info",
+        )
+
+
+class _UpdateCheckSignals(QObject):
+    done = Signal(object)
+
+
+class _UpdateCheckTask(QRunnable):
+    def __init__(self):
+        super().__init__()
+        self.signals = _UpdateCheckSignals()
+        self.setAutoDelete(True)
+
+    def run(self):
+        try:
+            import updater
+            info = updater.check_for_update(timeout=8)
+        except Exception:
+            info = None
+        try:
+            self.signals.done.emit(info)
+        except Exception:
+            pass
+
 
 class Launcher(QMainWindow):
     hotkey_pressed       = Signal()
@@ -1008,6 +1055,10 @@ class Launcher(QMainWindow):
         self._updates_timer.timeout.connect(self._check_updates_for_apps)
         self._updates_timer.start(10 * 60 * 1000)
         QTimer.singleShot(1500, self._check_updates_for_apps)
+
+        # Фоновая проверка новой версии лаунчера (через 8 секунд)
+        self._update_notified_version = ""
+        QTimer.singleShot(8000, self._background_check_launcher_update)
 
         self._init_plugins()
 

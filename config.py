@@ -45,7 +45,7 @@ APP_VERSION = "0.1.0"
 
 GITHUB_OWNER = "Mystiq-Tech-IS"
 GITHUB_REPO  = "my-launcher"
-GITHUB_REPO_URL =f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
+GITHUB_REPO_URL = f"https://github.com/Mystiq-Tech-IS/my-launcher"
 
 LATEST_VERSION  = "0.1.0"
 

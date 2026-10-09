@@ -11,17 +11,17 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QTabWidget,
     QWidget, QFormLayout, QScrollArea, QFrame, QGridLayout,
     QInputDialog, QColorDialog, QSlider, QToolButton, QSizePolicy,
-    QFontComboBox, QStackedWidget,
+    QFontComboBox, QStackedWidget, QProgressDialog, QApplication,
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPixmap, QColor, QFont
 
 try:
-    import qtawesome as qta
+    import qtawesome as qta  # type: ignore[import]
     HAS_QTAWESOME = True
 except ImportError:
     HAS_QTAWESOME = False
-    qta = None
+    qta = None  # type: ignore[assignment]
 
 from dialogs import dialog_qss, show_info, show_error
 from storage import log, BACKUP_DIR
@@ -3365,41 +3365,96 @@ class SettingsDialog(QDialog):
             total_label.setText("Всего за период: 0 сек")
 
     def _check_updates(self):
+        import updater
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Обновление")
+        box.setIcon(QMessageBox.Information)
+        box.setText("Проверяю обновления…")
+        box.setStyleSheet(dialog_qss(self.colors))
+        box.setStandardButtons(QMessageBox.NoButton)
+        box.show()
+        QApplication.processEvents()
+
         try:
-            cur = tuple(int(x) for x in APP_VERSION.split("."))
-            latest = tuple(int(x) for x in LATEST_VERSION.split("."))
-        except Exception:
-            show_info(self, self.colors, "Обновление",
-                      f"Текущая версия: {APP_VERSION}")
+            info = updater.check_for_update()
+        except Exception as e:
+            box.close()
+            show_error(self, self.colors, "Обновление", str(e))
             return
 
-        if latest > cur:
-            msg = (
-                f"Доступна новая версия!\n\n"
-                f"Текущая: {APP_VERSION}\n"
-                f"Новая:   {LATEST_VERSION}\n"
-            )
-            if GITHUB_REPO_URL:
-                msg += f"\n{GITHUB_REPO_URL}"
-            box = QMessageBox(self)
-            box.setWindowTitle("Обновление")
-            box.setText(msg)
-            box.setIcon(QMessageBox.Information)
-            box.setStyleSheet(dialog_qss(self.colors))
-            if GITHUB_REPO_URL:
-                open_btn = box.addButton("Открыть страницу",
-                                         QMessageBox.AcceptRole)
-                box.addButton("Закрыть", QMessageBox.RejectRole)
-                box.exec()
-                if box.clickedButton() == open_btn:
-                    webbrowser.open(GITHUB_REPO_URL)
-            else:
-                box.addButton("OK", QMessageBox.AcceptRole)
-                box.exec()
-        else:
-            show_info(self, self.colors, "Обновление",
-                      f"У вас последняя версия: {APP_VERSION}")
+        box.close()
 
+        if info is None:
+            show_info(
+                self, self.colors, "Обновление",
+                f"У вас последняя версия: {APP_VERSION}"
+            )
+            return
+
+        msg = (
+            f"Доступна новая версия!\n\n"
+            f"Текущая: {APP_VERSION}\n"
+            f"Новая:   {info.version}\n\n"
+        )
+        if info.changelog:
+            msg += info.changelog[:800]
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Доступно обновление")
+        dlg.setIcon(QMessageBox.Information)
+        dlg.setText(msg)
+        dlg.setStyleSheet(dialog_qss(self.colors))
+        btn_install = dlg.addButton(
+            "Скачать и установить", QMessageBox.AcceptRole
+        )
+        dlg.addButton("Позже", QMessageBox.RejectRole)
+        dlg.exec()
+
+        if dlg.clickedButton() != btn_install:
+            return
+
+        # Прогресс-бар
+        prog = QProgressDialog(
+            "Скачивание обновления…", "Отмена", 0, 100, self
+        )
+        prog.setWindowTitle("Обновление")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setStyleSheet(dialog_qss(self.colors))
+
+        def on_progress(done, total):
+            if total:
+                prog.setValue(int(done * 100 / total))
+            QApplication.processEvents()
+
+        path = updater.download_update(info, progress_callback=on_progress)
+        prog.close()
+
+        if not path:
+            show_error(
+                self, self.colors, "Обновление",
+                "Не удалось скачать обновление.\n"
+                "Проверь интернет и попробуй снова."
+            )
+            return
+
+        ok = updater.apply_update_and_restart(path)
+        if not ok:
+            show_error(
+                self, self.colors, "Обновление",
+                f"Скачано в:\n{path}\n\n"
+                "Автоустановка недоступна (запущено не как .exe).\n"
+                "Замени файл вручную."
+            )
+            return
+
+        QMessageBox.information(
+            self, "Обновление",
+            "Обновление готово.\n"
+            "Лаунчер сейчас закроется и перезапустится."
+        )
+        QApplication.quit()
     # ==================== СБОР / СОХРАНЕНИЕ ====================
     def _collect_ui_settings(self):
         s = dict(self.settings)
