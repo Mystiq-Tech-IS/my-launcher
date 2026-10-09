@@ -41,13 +41,13 @@ PROFILES_PATH = os.path.join(BASE_DIR, "profiles.json")
 LOG_PATH      = os.path.join(BASE_DIR, "launcher.log")
 
 APP_NAME    = "MyLauncher"
-APP_VERSION = "0.1.0"
+APP_VERSION = "3.2.0"
 
 GITHUB_OWNER = "Mystiq-Tech-IS"
 GITHUB_REPO  = "my-launcher"
 GITHUB_REPO_URL = f"https://github.com/Mystiq-Tech-IS/my-launcher"
 
-LATEST_VERSION  = "0.1.0"
+LATEST_VERSION  = "3.2.0"
 
 DEFAULT_SETTINGS = {
     # Отображаемое название лаунчера — можно менять в Настройках.

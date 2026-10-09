@@ -13,6 +13,7 @@
 import os
 import sys
 import json
+import socket
 import hashlib
 import tempfile
 import subprocess
@@ -62,11 +63,17 @@ def _version_tuple(v):
 
 
 def _http_get(url, timeout=10):
+    """HTTP GET с жёстким таймаутом, включая DNS-резолв."""
     req = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    old = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    finally:
+        socket.setdefaulttimeout(old)
 
 
 def check_for_update(timeout=10):
@@ -191,9 +198,17 @@ def _sha256(path):
 
 
 def apply_update_and_restart(new_exe_path):
-    """Запускает .bat-хелпер, который подменит .exe и перезапустит.
+    """Запускает .bat-хелпер, который дождётся закрытия процесса,
+    подменит .exe и перезапустит лаунчер.
 
-    Возвращает True если хелпер запущен.
+    Логика .bat:
+      1. Ждёт до 3 секунд, что процесс сам закроется.
+      2. Если не закрылся — принудительно убивает через taskkill.
+      3. Делает бэкап старого .exe.
+      4. Подменяет .exe.
+      5. Перезапускает лаунчер.
+
+    Возвращает True, если хелпер запущен.
     """
     if not getattr(sys, "frozen", False):
         log.warning("updater: не frozen — автоустановка недоступна")
@@ -209,49 +224,68 @@ def apply_update_and_restart(new_exe_path):
     helper_dir = os.path.dirname(new_exe_path)
     helper_path = os.path.join(helper_dir, "apply_update.bat")
 
-    bat = f"""@echo off
-chcp 65001 >nul
-setlocal
+    pid = os.getpid()
 
-set "TARGET={current_exe}"
-set "NEW={new_exe_path}"
-set "BACKUP=%TARGET%.old"
-
-echo Waiting for launcher to close...
-:waitloop
-tasklist /FI "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto waitloop
-)
-
-echo Backing up...
-if exist "%BACKUP%" del /f /q "%BACKUP%"
-move /y "%TARGET%" "%BACKUP%" >nul
-
-echo Installing update...
-move /y "%NEW%" "%TARGET%" >nul
-
-if errorlevel 1 (
-    echo Failed, rolling back...
-    move /y "%BACKUP%" "%TARGET%" >nul
-    pause
-    exit /b 1
-)
-
-echo Restarting...
-start "" "%TARGET%"
-
-timeout /t 2 /nobreak >nul
-del /f /q "%BACKUP%" 2>nul
-exit /b 0
-"""
+    bat_lines = [
+        "@echo off",
+        "chcp 65001 >nul",
+        "setlocal",
+        "",
+        f'set "TARGET={current_exe}"',
+        f'set "NEW={new_exe_path}"',
+        'set "BACKUP=%TARGET%.old"',
+        "",
+        f"echo Waiting for launcher to close (PID {pid})...",
+        "set /a WAITED=0",
+        ":waitloop",
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul',
+        "if not errorlevel 1 (",
+        "    timeout /t 1 /nobreak >nul",
+        "    set /a WAITED+=1",
+        "    if %WAITED% GEQ 3 goto forcekill",
+        "    goto waitloop",
+        ")",
+        "goto dokill",
+        "",
+        ":forcekill",
+        "echo Process didn't close, forcing...",
+        f"taskkill /F /PID {pid} >nul 2>&1",
+        "taskkill /F /IM MyLauncher.exe >nul 2>&1",
+        "timeout /t 2 /nobreak >nul",
+        "",
+        ":dokill",
+        "echo Backing up...",
+        'if exist "%BACKUP%" del /f /q "%BACKUP%"',
+        'move /y "%TARGET%" "%BACKUP%" >nul',
+        "if errorlevel 1 (",
+        "    echo Cannot backup old exe - file is locked.",
+        "    echo Update aborted, your file is untouched.",
+        "    pause",
+        "    exit /b 1",
+        ")",
+        "",
+        "echo Installing update...",
+        'move /y "%NEW%" "%TARGET%" >nul',
+        "if errorlevel 1 (",
+        "    echo Install failed, restoring backup...",
+        '    move /y "%BACKUP%" "%TARGET%" >nul',
+        "    pause",
+        "    exit /b 1",
+        ")",
+        "",
+        "echo Restarting...",
+        'start "" "%TARGET%"',
+        "timeout /t 3 /nobreak >nul",
+        'del /f /q "%BACKUP%" 2>nul',
+        "exit /b 0",
+        "",
+    ]
 
     try:
         with open(helper_path, "w", encoding="utf-8") as f:
-            f.write(bat)
-    except Exception as e:
-        log.error(f"updater write helper: {e}")
+            f.write("\n".join(bat_lines))
+    except Exception as ex:
+        log.error(f"updater write helper: {ex}")
         return False
 
     try:
@@ -261,6 +295,6 @@ exit /b 0
             close_fds=True,
         )
         return True
-    except Exception as e:
-        log.error(f"updater spawn helper: {e}")
+    except Exception as ex:
+        log.error(f"updater spawn helper: {ex}")
         return False

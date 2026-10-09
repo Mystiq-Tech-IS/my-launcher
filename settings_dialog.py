@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QTabWidget,
     QWidget, QFormLayout, QScrollArea, QFrame, QGridLayout,
     QInputDialog, QColorDialog, QSlider, QToolButton, QSizePolicy,
-    QFontComboBox, QStackedWidget, QProgressDialog, QApplication,
+    QFontComboBox, QStackedWidget, QApplication,
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QColor, QFont
 
 try:
@@ -460,6 +460,9 @@ class SettingsDialog(QDialog):
 
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
+
+        self._update_box = None
+        self._update_check_in_progress = False
 
         self._build_appearance_tab()
         self._build_behavior_tab()
@@ -3365,56 +3368,143 @@ class SettingsDialog(QDialog):
             total_label.setText("Всего за период: 0 сек")
 
     def _check_updates(self):
-        import updater
+        """Проверка обновлений в фоне. UI не блокируется."""
+        import threading
+        from storage import log
 
-        box = QMessageBox(self)
-        box.setWindowTitle("Обновление")
-        box.setIcon(QMessageBox.Information)
-        box.setText("Проверяю обновления…")
-        box.setStyleSheet(dialog_qss(self.colors))
-        box.setStandardButtons(QMessageBox.NoButton)
-        box.show()
+        log.info("[update] check_updates: старт")
+
+        if getattr(self, "_update_check_in_progress", False):
+            log.info("[update] уже выполняется — пропуск")
+            return
+        self._update_check_in_progress = True
+
+        # --- Спиннер на QDialog ---
+        spinner = QDialog(self)
+        spinner.setWindowTitle("Обновление")
+        spinner.setStyleSheet(dialog_qss(self.colors))
+        spinner.setModal(False)
+        spinner.setMinimumWidth(360)
+        spinner.setWindowFlag(Qt.WindowCloseButtonHint, False)
+
+        sp_lay = QVBoxLayout(spinner)
+        sp_lay.setContentsMargins(24, 24, 24, 24)
+        sp_lay.setSpacing(12)
+
+        sp_title = QLabel("Проверяю обновления…")
+        sp_title.setStyleSheet(
+            f"color: {self.colors['TEXT']}; font-size: 14px; "
+            f"font-weight: bold; background: transparent;"
+        )
+        sp_title.setAlignment(Qt.AlignCenter)
+        sp_lay.addWidget(sp_title)
+
+        sp_ver = QLabel(f"Текущая версия: {APP_VERSION}")
+        sp_ver.setStyleSheet(
+            f"color: {self.colors['SUBTEXT']}; font-size: 12px; "
+            f"background: transparent;"
+        )
+        sp_ver.setAlignment(Qt.AlignCenter)
+        sp_lay.addWidget(sp_ver)
+
+        self._update_spinner = spinner
+        spinner.show()
         QApplication.processEvents()
+        log.info("[update] спиннер показан")
 
-        try:
-            info = updater.check_for_update()
-        except Exception as e:
-            box.close()
-            show_error(self, self.colors, "Обновление", str(e))
-            return
+        result = {"done": False, "info": None}
 
-        box.close()
+        def _worker():
+            log.info("[update] worker: старт")
+            info = None
+            try:
+                import updater
+                info = updater.check_for_update(timeout=5)
+                log.info(f"[update] worker: ответ = {info}")
+            except Exception as e:
+                log.error(f"[update] worker: {e}")
+            result["info"] = info
+            result["done"] = True
+            log.info("[update] worker: завершён")
 
-        if info is None:
-            show_info(
-                self, self.colors, "Обновление",
-                f"У вас последняя версия: {APP_VERSION}"
+        threading.Thread(target=_worker, daemon=True).start()
+
+        poll = {"n": 0}
+
+        def _close_spinner():
+            try:
+                sp = getattr(self, "_update_spinner", None)
+                if sp is not None:
+                    sp.hide()
+                    sp.setParent(None)
+                    sp.deleteLater()
+                    self._update_spinner = None
+            except Exception as e:
+                log.error(f"[update] close_spinner: {e}")
+            QApplication.processEvents()
+
+        def _show_result(info):
+            self._update_check_in_progress = False
+            log.info(f"[update] результат: {info}")
+
+            if info is None:
+                show_info(
+                    self, self.colors, "Обновление",
+                    f"У вас актуальная версия: {APP_VERSION}"
+                )
+                return
+
+            msg = (
+                f"Доступна новая версия!\n\n"
+                f"Текущая: {APP_VERSION}\n"
+                f"Новая:   {info.version}\n\n"
             )
-            return
+            if info.changelog:
+                msg += info.changelog[:800]
 
-        msg = (
-            f"Доступна новая версия!\n\n"
-            f"Текущая: {APP_VERSION}\n"
-            f"Новая:   {info.version}\n\n"
-        )
-        if info.changelog:
-            msg += info.changelog[:800]
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Доступно обновление")
+            dlg.setIcon(QMessageBox.Information)
+            dlg.setText(msg)
+            dlg.setStyleSheet(dialog_qss(self.colors))
+            dlg.setMinimumWidth(520)  # ← чтобы кнопки не срезались
 
-        dlg = QMessageBox(self)
-        dlg.setWindowTitle("Доступно обновление")
-        dlg.setIcon(QMessageBox.Information)
-        dlg.setText(msg)
-        dlg.setStyleSheet(dialog_qss(self.colors))
-        btn_install = dlg.addButton(
-            "Скачать и установить", QMessageBox.AcceptRole
-        )
-        dlg.addButton("Позже", QMessageBox.RejectRole)
-        dlg.exec()
+            btn_install = dlg.addButton(
+                "Скачать и установить", QMessageBox.AcceptRole
+            )
+            btn_install.setMinimumWidth(180)
+            btn_install.setMinimumHeight(38)
 
-        if dlg.clickedButton() != btn_install:
-            return
+            btn_later = dlg.addButton("Позже", QMessageBox.RejectRole)
+            btn_later.setMinimumWidth(100)
+            btn_later.setMinimumHeight(38)
 
-        # Прогресс-бар
+            dlg.exec()
+
+            if dlg.clickedButton() != btn_install:
+                return
+            self._download_and_install(info)
+
+        def _poll():
+            poll["n"] += 1
+            if result["done"]:
+                log.info(f"[update] poll: готово за {poll['n']*200} мс")
+                _close_spinner()
+                _show_result(result["info"])
+                return
+            if poll["n"] > 35:
+                log.warning("[update] poll: таймаут — закрываю принудительно")
+                _close_spinner()
+                _show_result(None)
+                return
+            QTimer.singleShot(200, _poll)
+
+        QTimer.singleShot(200, _poll)
+
+    def _download_and_install(self, info):
+        """Скачивает и устанавливает обновление."""
+        from PySide6.QtWidgets import QProgressDialog
+
         prog = QProgressDialog(
             "Скачивание обновления…", "Отмена", 0, 100, self
         )
@@ -3422,13 +3512,21 @@ class SettingsDialog(QDialog):
         prog.setWindowModality(Qt.WindowModal)
         prog.setMinimumDuration(0)
         prog.setStyleSheet(dialog_qss(self.colors))
+        prog.setValue(0)
 
         def on_progress(done, total):
             if total:
                 prog.setValue(int(done * 100 / total))
             QApplication.processEvents()
 
-        path = updater.download_update(info, progress_callback=on_progress)
+        try:
+            import updater
+            path = updater.download_update(info, progress_callback=on_progress)
+        except Exception as e:
+            prog.close()
+            show_error(self, self.colors, "Обновление", str(e))
+            return
+
         prog.close()
 
         if not path:
@@ -3454,8 +3552,18 @@ class SettingsDialog(QDialog):
             "Обновление готово.\n"
             "Лаунчер сейчас закроется и перезапустится."
         )
-        QApplication.quit()
-    # ==================== СБОР / СОХРАНЕНИЕ ====================
+
+        import os as _os
+        _os._exit(0)
+
+        # Принудительный выход — QApplication.quit() не работает из
+        # вложенного event loop открытого SettingsDialog. closeAllWindows()
+        # сворачивает окно в трей (close_to_tray=True), а не закрывает.
+        # os._exit(0) убивает процесс мгновенно и разблокирует .exe
+        # для .bat-хелпера, который ждёт наш PID.
+        import os as _os
+        _os._exit(0)
+
     def _collect_ui_settings(self):
         s = dict(self.settings)
         s["app_name"] = (self.app_name_edit.text().strip() or APP_NAME)

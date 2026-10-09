@@ -3668,6 +3668,32 @@ class Launcher(QMainWindow):
         if has_updates:
             self.render_cards()
         self._update_settings_badge(has_updates)
+
+    def _background_check_launcher_update(self):
+        """Тихая проверка новой версии — показывает тост, если есть."""
+        try:
+            import updater
+        except Exception as e:
+            log.error(f"updater import: {e}")
+            return
+
+        task = _UpdateCheckTask()
+        task.signals.done.connect(self._on_launcher_update_result)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_launcher_update_result(self, info):
+        if info is None:
+            return
+        if self._update_notified_version == info.version:
+            return
+        self._update_notified_version = info.version
+
+        self._show_toast(
+            f"Доступно обновление {info.version}",
+            "Настройки → О программе → Проверить обновления",
+            "info",
+        )
+
     def _update_settings_badge(self, has_updates):
         try:
             if self._settings_badge is None:
